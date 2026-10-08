@@ -172,6 +172,13 @@ async def analizar_imagen(
     return resultado
 
 
+# Montaje del frontend estático para despliegue unificado (ej. en Render)
+ruta_frontend = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
+if os.path.exists(ruta_frontend):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=ruta_frontend, html=True), name="frontend")
+
+
 # Punto de entrada para ejecución directa
 if __name__ == "__main__":
     import uvicorn
