@@ -1,0 +1,13 @@
+# AulaPredict - Dependencias Backend
+# Compatible con Python 3.10 y 3.11
+# Nota: numpy < 2.0.0 es necesario para compatibilidad con TensorFlow 2.16 y DeepFace
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+python-multipart>=0.0.9
+numpy>=1.24.0,<2.0.0
+pillow>=10.0.0
+opencv-python-headless>=4.8.0
+tensorflow>=2.15.0,<2.17.0
+tf-keras>=2.16.0
+deepface>=0.0.92

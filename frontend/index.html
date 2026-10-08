@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AulaPredict | Módulo de Detección de Estado Emocional</title>
+  <meta name="description" content="Herramienta de apoyo tutorial para docentes. Detección automática en memoria de expresión facial y estado académico.">
+  
+  <!-- Tipografía sobria e institucional -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="style.css">
+
+  <!-- MediaPipe Face Detection CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <div class="page-container">
+    
+    <!-- Encabezado institucional simple -->
+    <header class="app-header">
+      <div class="header-main">
+        <h1 class="app-title">AulaPredict</h1>
+        <p class="app-description">Herramienta de estimación emocional para acompañamiento tutorial</p>
+      </div>
+      <div class="header-status">
+        <span id="backend-status-badge" class="connection-indicator status-checking">
+          <span class="indicator-dot"></span>
+          <span id="backend-status-text">Conectando con el servidor...</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Avisos del sistema (preparación o fallas) -->
+    <div id="warmup-banner" class="notice-box notice-warning hidden" role="status">
+      <span class="notice-text">El modelo de análisis se está iniciando en el servidor. Esto puede tomar unos segundos en el primer uso.</span>
+    </div>
+
+    <div id="error-banner" class="notice-box notice-error hidden" role="alert">
+      <span id="error-banner-text" class="notice-text">Error en la comunicación con el servidor o la cámara.</span>
+      <button id="btn-close-error" class="btn-text-close" aria-label="Cerrar mensaje">Cerrar</button>
+    </div>
+
+    <!-- Zona principal: Cámara (izquierda) y Resultado (derecha) -->
+    <main class="workspace-grid">
+      
+      <!-- COLUMNA IZQUIERDA: CÁMARA Y ENCUADRE -->
+      <section class="panel camera-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Cámara y encuadre</h2>
+          <span id="detection-state-badge" class="state-pill state-waiting">
+            <span id="detection-state-text">Esperando rostro</span>
+          </span>
+        </div>
+
+        <div class="camera-wrapper">
+          <div class="video-container" id="camera-viewport">
+            <video id="webcam" autoplay playsinline muted></video>
+            <canvas id="overlay-canvas"></canvas>
+
+            <!-- Silueta sobria de referencia -->
+            <div class="face-guide" id="face-guide">
+              <span class="face-guide-label" id="guide-text">Centra tu rostro aquí</span>
+            </div>
+
+            <!-- Efecto sutil de captura -->
+            <div id="camera-flash" class="camera-flash"></div>
+
+            <!-- Mensaje mientras analiza -->
+            <div id="analyzing-overlay" class="analyzing-overlay hidden">
+              <span class="analyzing-spinner"></span>
+              <p class="analyzing-message">Analizando imagen...</p>
+            </div>
+
+            <!-- Aviso cuando la cámara no está disponible -->
+            <div id="camera-offline-overlay" class="camera-offline-overlay hidden">
+              <h3 id="camera-offline-title">Acceso a cámara requerido</h3>
+              <p id="camera-offline-desc">Permite el acceso a la cámara web en tu navegador para continuar.</p>
+              <button id="btn-retry-camera" class="btn btn-primary">Reintentar conexión</button>
+            </div>
+          </div>
+
+          <!-- Barra de estabilidad funcional -->
+          <div class="stability-row">
+            <span class="stability-text">Estabilidad de captura:</span>
+            <div class="stability-bar-track">
+              <div id="stability-fill" class="stability-bar-fill"></div>
+            </div>
+            <span id="stability-percent" class="stability-value">0%</span>
+          </div>
+
+          <!-- Aviso de privacidad discreto junto a la cámara -->
+          <p class="privacy-note">
+            Privacidad: La imagen no se guarda en disco; solo se procesa en memoria y se muestra el resultado en pantalla.
+          </p>
+
+          <!-- Controles de la cámara -->
+          <div class="controls-row">
+            <button id="btn-manual-capture" class="btn btn-secondary">Capturar manualmente</button>
+            <button id="btn-reanalyze" class="btn btn-primary">Volver a analizar</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- COLUMNA DERECHA: RESULTADO DEL ANÁLISIS -->
+      <section class="panel results-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Resultado de la estimación</h2>
+        </div>
+
+        <!-- Estado inicial antes de la primera captura -->
+        <div id="results-empty" class="results-placeholder">
+          <p class="placeholder-title">Sin captura reciente</p>
+          <p class="placeholder-desc">Colócate de frente a la cámara durante 1 segundo con iluminación adecuada. La foto se tomará automáticamente.</p>
+        </div>
+
+        <!-- Panel activo con resultados -->
+        <div id="results-content" class="results-data hidden">
+          
+          <div class="summary-box">
+            <div class="photo-preview">
+              <img id="snapshot-img" src="" alt="Fotografía analizada" class="snapshot-frame">
+            </div>
+            
+            <div class="summary-details">
+              <!-- Elemento span oculto para mantener compatibilidad con selector DOM -->
+              <span id="result-emoji" class="hidden"></span>
+
+              <div class="detail-row">
+                <span class="detail-label">Emoción predominante:</span>
+                <span id="result-emotion-title" class="detail-value-emotion">Neutral</span>
+              </div>
+
+              <div class="detail-row">
+                <span class="detail-label">Nivel de confianza:</span>
+                <span id="result-confidence-val" class="detail-value">0%</span>
+              </div>
+
+              <div class="detail-row">
+                <span class="detail-label">Estado académico sugerido:</span>
+                <span id="academic-status-pill" class="academic-badge academic-estable">
+                  <span id="academic-status-icon" class="hidden"></span>
+                  <span id="academic-status-text">Estable</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Lista de probabilidades -->
+          <div class="probabilities-container">
+            <h3 class="subsection-title">Distribución de probabilidades</h3>
+            <div id="prob-bars-list" class="prob-list">
+              <!-- Rellenado dinámico por app.js -->
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+
+    <!-- SECCIÓN INFERIOR: HISTORIAL DE OBSERVACIONES (TABLA SIMPLE) -->
+    <section class="panel history-panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Historial de observaciones en esta sesión</h2>
+        <span id="history-counter" class="history-count">0 registros</span>
+      </div>
+
+      <div id="history-empty" class="history-empty-note">
+        <p>No se han registrado observaciones en esta sesión todavía.</p>
+      </div>
+
+      <div class="table-responsive">
+        <table class="history-table" id="history-table">
+          <thead>
+            <tr>
+              <th scope="col" style="width: 15%;">Hora</th>
+              <th scope="col" style="width: 15%;">Fotografía</th>
+              <th scope="col" style="width: 25%;">Emoción estimada</th>
+              <th scope="col" style="width: 20%;">Confianza</th>
+              <th scope="col" style="width: 25%;">Estado académico</th>
+            </tr>
+          </thead>
+          <tbody id="history-grid">
+            <!-- Filas inyectadas por app.js -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="app-footer">
+      <p>AulaPredict &bull; Módulo de imagen para orientación y tutoría académica</p>
+    </footer>
+
+  </div>
+
+  <!-- Canvas oculto para captura en memoria -->
+  <canvas id="hidden-capture-canvas" style="display: none;"></canvas>
+
+  <script src="app.js"></script>
+</body>
+</html>

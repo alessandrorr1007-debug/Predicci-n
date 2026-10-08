@@ -1,0 +1,34 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Python y caché
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# DeepFace y pesos pesados descargados dinámicamente
+.deepface/
+weights/
+*.h5
+*.keras
+
+# Logs y variables de entorno
+*.log
+.env
+.env.*
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
