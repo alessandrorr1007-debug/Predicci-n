@@ -228,13 +228,13 @@ def _validar_presencia_rostro(img_bgr: np.ndarray, analisis: dict) -> bool:
 
 def _inferir_con_deepface_tta(img_mejorada: np.ndarray) -> dict:
     """
-    Ejecuta inferencia con Test-Time Augmentation (TTA):
-    Promedia las predicciones de la imagen original y la versión espejo horizontal.
-    Aplica alineación ocular (align=True) y expansión de borde.
+    Ejecuta inferencia optimizada con DeepFace con alineación ocular (align=True)
+    y gestión eficiente de memoria para entornos en la nube (Render 512MB).
     """
+    import gc
     from deepface import DeepFace
 
-    # 1. Pase original
+    # Pase principal con alineación ocular y detección de emociones
     res_orig = DeepFace.analyze(
         img_path=img_mejorada,
         actions=["emotion"],
@@ -243,35 +243,13 @@ def _inferir_con_deepface_tta(img_mejorada: np.ndarray) -> dict:
         expand_percentage=10,
         silent=True,
     )
-    analisis_orig = res_orig[0] if isinstance(res_orig, list) else res_orig
-
-    # 2. Pase invertido (TTA espejo)
-    img_flip = cv2.flip(img_mejorada, 1)
-    res_flip = DeepFace.analyze(
-        img_path=img_flip,
-        actions=["emotion"],
-        enforce_detection=False,
-        align=True,
-        expand_percentage=10,
-        silent=True,
-    )
-    analisis_flip = res_flip[0] if isinstance(res_flip, list) else res_flip
-
-    # Promediar probabilidades TTA
-    emociones_1 = analisis_orig.get("emotion", {})
-    emociones_2 = analisis_flip.get("emotion", {})
-    
-    emociones_promedio = {}
-    todas_claves = set(emociones_1.keys()).union(emociones_2.keys())
-    for k in todas_claves:
-        val1 = float(emociones_1.get(k, 0.0))
-        val2 = float(emociones_2.get(k, 0.0))
-        emociones_promedio[k] = (val1 + val2) / 2.0
+    analisis = res_orig[0] if isinstance(res_orig, list) else res_orig
+    gc.collect()
 
     return {
-        "emotion": emociones_promedio,
-        "region": analisis_orig.get("region", {}),
-        "face_confidence": max(analisis_orig.get("face_confidence", 0.0), analisis_flip.get("face_confidence", 0.0)),
+        "emotion": analisis.get("emotion", {}),
+        "region": analisis.get("region", {}),
+        "face_confidence": float(analisis.get("face_confidence", 0.0)),
     }
 
 
@@ -311,7 +289,14 @@ def detectar_emocion(imagen_bytes: bytes) -> dict:
                 resp["mensaje"] = "El archivo enviado no es una imagen válida o está dañado."
                 return resp
 
-        # 1. Aplicar preprocesamiento de mejora visual (CLAHE + Denoising)
+        # 1. Redimensionar a resolución óptima (máx 640px) para evitar saturación de RAM en servidores de 512MB
+        h_orig, w_orig = img_bgr.shape[:2]
+        max_dim = 640
+        if max(h_orig, w_orig) > max_dim:
+            escala = max_dim / float(max(h_orig, w_orig))
+            img_bgr = cv2.resize(img_bgr, (int(w_orig * escala), int(h_orig * escala)), interpolation=cv2.INTER_AREA)
+
+        # 2. Aplicar preprocesamiento de mejora visual (CLAHE + Denoising)
         img_optimizada = mejorar_calidad_imagen(img_bgr)
 
         # 2. Inferencia con Modelo Personalizado de Colab o DeepFace TTA
