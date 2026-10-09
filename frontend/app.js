@@ -260,7 +260,7 @@ async function verificarSaludBackend() {
     const urlNube = CONFIG.RENDER_BACKEND_URL;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
       const resFallback = await fetch(`${urlNube}/salud`, { method: 'GET', signal: controller.signal });
       clearTimeout(timeoutId);
       if (resFallback.ok) {
@@ -577,7 +577,7 @@ async function enviarImagenABackend(blobOFile) {
   for (const urlBase of urlsAProbar) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
       const response = await fetch(`${urlBase}/analizar`, {
         method: 'POST',
         body: formData,
