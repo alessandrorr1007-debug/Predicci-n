@@ -58,6 +58,23 @@ OBJETOS_NO_PERMITIDOS = {
 # Objetos contextuales / permitidos
 OBJETOS_PERMITIDOS = {"persona", "mochila", "laptop"}
 
+# Umbrales específicos por clase (calibrados acordes al módulo IMAGEN)
+# Teléfono, audífonos y reloj se detectan con alta sensibilidad (>= 0.15)
+UMBRALES_POR_CLASE = {
+    "persona": 0.20,
+    "telefono": 0.15,
+    "celular": 0.15,
+    "phone": 0.15,
+    "audifonos": 0.15,
+    "airpods": 0.15,
+    "reloj": 0.15,
+    "mochila": 0.15,
+    "laptop": 0.25,
+    "cuaderno": 0.55,
+    "libro": 0.55,
+}
+UMBRAL_CORTE_GLOBAL = 0.15
+
 # Modelo YOLO singleton en memoria
 _modelo_yolo = None
 _modelo_listo = False
@@ -101,6 +118,30 @@ def medir_calidad_imagen(img_bgr: np.ndarray) -> Dict[str, float]:
         "contraste": round(contraste, 2),
         "nitidez": round(nitidez, 2),
     }
+
+
+def preprocesar_y_mejorar_imagen(img_bgr: np.ndarray) -> np.ndarray:
+    """
+    Aplica técnicas de mejoramiento del módulo IMAGEN:
+    1. Ajuste adaptativo de contraste CLAHE en luminancia (LAB) para rescatar objetos en sombras o contraluz.
+    2. Máscara de enfoque (unsharp masking) para acentuar bordes y siluetas de dispositivos y manos.
+    """
+    try:
+        # CLAHE en luminancia (espacio LAB) para no distorsionar colores
+        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        lab_clahe = cv2.merge((l_clahe, a, b))
+        img_clahe = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2BGR)
+
+        # Máscara de enfoque para bordes nítidos
+        suavizada = cv2.GaussianBlur(img_clahe, (0, 0), sigmaX=1.8)
+        img_enfocada = cv2.addWeighted(img_clahe, 1.25, suavizada, -0.25, 0)
+        return img_enfocada
+    except Exception as e:
+        logger.warning(f"Error en mejoramiento de imagen, usando original: {e}")
+        return img_bgr
 
 
 def calcular_interseccion_y_distancia(
@@ -285,19 +326,35 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
             }
         }
 
-    # Inferencia con YOLO
-    resultados = modelo(img_bgr, conf=0.25, verbose=False)
+    # 2. Preprocesamiento y mejoramiento de imagen para potenciar objetos
+    img_mejorada = preprocesar_y_mejorar_imagen(img_bgr)
+
+    # 3. Inferencia con YOLOv8 (usando corte sensible 0.15, imgsz=640 e iou=0.45)
+    resultados = modelo.predict(
+        source=img_mejorada,
+        conf=UMBRAL_CORTE_GLOBAL,
+        iou=0.45,
+        imgsz=640,
+        verbose=False
+    )
     detecciones = []
     personas_cajas = []
 
-    # Extraer personas primero
+    # Extraer detecciones aplicando umbrales calibrados por clase
     for r in resultados:
-        boxes = r.boxes
-        for b in boxes:
+        if r.boxes is None:
+            continue
+        for b in r.boxes:
             cls_id = int(b.cls[0].item())
             conf = float(b.conf[0].item())
             x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
             clase_nombre = CLASES_MODELO[cls_id] if cls_id < len(CLASES_MODELO) else f"clase_{cls_id}"
+            clase_key = clase_nombre.lower()
+
+            # Umbral de corte calibrado por objeto
+            umbral_min = UMBRALES_POR_CLASE.get(clase_key, 0.20)
+            if conf < umbral_min:
+                continue
 
             det = {
                 "id": len(detecciones) + 1,
@@ -306,8 +363,42 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
                 "caja": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
             }
             detecciones.append(det)
-            if clase_nombre == "persona":
+            if clase_key == "persona":
                 personas_cajas.append([x1, y1, x2, y2])
+
+    # Cobertura adicional: si no detectó objeto infractor en la imagen mejorada, probar sobre imagen original
+    tiene_infraccion = any(d["clase"].lower() in OBJETOS_NO_PERMITIDOS for d in detecciones)
+    if not tiene_infraccion:
+        res_orig = modelo.predict(
+            source=img_bgr,
+            conf=UMBRAL_CORTE_GLOBAL,
+            iou=0.45,
+            imgsz=640,
+            verbose=False
+        )
+        for r in res_orig:
+            if r.boxes is None:
+                continue
+            for b in r.boxes:
+                cls_id = int(b.cls[0].item())
+                conf = float(b.conf[0].item())
+                clase_nombre = CLASES_MODELO[cls_id] if cls_id < len(CLASES_MODELO) else f"clase_{cls_id}"
+                clase_key = clase_nombre.lower()
+                umbral_min = UMBRALES_POR_CLASE.get(clase_key, 0.20)
+                if conf >= umbral_min and clase_key in OBJETOS_NO_PERMITIDOS:
+                    x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
+                    # Evitar duplicados
+                    ya_registrado = any(
+                        abs(d["caja"][0] - x1) < 25 and abs(d["caja"][1] - y1) < 25
+                        for d in detecciones if d["clase"].lower() == clase_key
+                    )
+                    if not ya_registrado:
+                        detecciones.append({
+                            "id": len(detecciones) + 1,
+                            "clase": clase_nombre,
+                            "confianza": round(conf, 3),
+                            "caja": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                        })
 
     # Calcular relaciones espaciales para objetos no permitidos
     for det in detecciones:
