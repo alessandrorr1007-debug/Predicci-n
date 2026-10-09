@@ -11,7 +11,7 @@ __pycache__/
 *.so
 .pytest_cache/
 
-# DeepFace y pesos pesados descargados en tiempo de ejecución
+# DeepFace y pesos pesados descargados dinámicamente
 .deepface/
 weights/
 *.h5
@@ -26,3 +26,9 @@ weights/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
