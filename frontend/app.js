@@ -20,9 +20,9 @@ const CONFIG = {
   BACKEND_URL: (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || !window.location.hostname)
     ? 'http://127.0.0.1:8000'
     : 'https://prediccion-backend-dwq9.onrender.com',
-  STABILITY_REQUIRED_MS: 1000,
-  COOLDOWN_MS: 5000,
-  MIN_FACE_SIZE_RATIO: 0.15,
+  STABILITY_REQUIRED_MS: 800,
+  COOLDOWN_MS: 3500,
+  MIN_FACE_SIZE_RATIO: 0.002,
   POLL_HEALTH_INTERVAL_MS: 8000,
   MAX_HISTORY_ITEMS: 10,
 };
@@ -356,7 +356,7 @@ function iniciarMediaPipe() {
 
     faceDetectionInstance.setOptions({
       model: 'short',
-      minDetectionConfidence: 0.65,
+      minDetectionConfidence: 0.45,
     });
 
     faceDetectionInstance.onResults(onResultadosMediaPipe);
@@ -407,13 +407,16 @@ function onResultadosMediaPipe(results) {
   const boxY = box.yCenter * videoH - boxH / 2;
 
   const faceRatio = (boxW * boxH) / (videoW * videoH);
-  const faceAdecuado = faceRatio >= CONFIG.MIN_FACE_SIZE_RATIO;
 
-  const centerX = boxX + boxW / 2;
-  const centerY = boxY + boxH / 2;
-  const centrado = (
-    centerX > videoW * 0.25 && centerX < videoW * 0.75 &&
-    centerY > videoH * 0.20 && centerY < videoH * 0.80
+  // Detección permisiva a cualquier distancia:
+  // - Rostro detectado con tamaño mínimo real (>= 12px)
+  // - Al menos parte del rostro visible dentro de la cámara
+  const faceAdecuado = faceRatio >= CONFIG.MIN_FACE_SIZE_RATIO && boxW >= 12 && boxH >= 12;
+  const enRangoCamara = (
+    boxX + boxW * 0.15 >= 0 &&
+    boxX + boxW * 0.85 <= videoW &&
+    boxY + boxH * 0.15 >= 0 &&
+    boxY + boxH * 0.85 <= videoH
   );
 
   if (state.isInCooldown) {
@@ -421,13 +424,17 @@ function onResultadosMediaPipe(results) {
     return;
   }
 
-  if (faceAdecuado && centrado) {
+  if (faceAdecuado && enRangoCamara) {
     state.faceDetected = true;
-    dibujarBordeRostro(ctx, boxX, boxY, boxW, boxH, '#166534');
+    dibujarBordeRostro(ctx, boxX, boxY, boxW, boxH, '#22c55e');
+    DOM.faceGuide.classList.add('active');
+    DOM.guideText.textContent = 'Estudiante detectado • Mantén posición';
     gestionarEstabilidad(true);
   } else {
     state.faceDetected = false;
-    dibujarBordeRostro(ctx, boxX, boxY, boxW, boxH, '#d97706');
+    dibujarBordeRostro(ctx, boxX, boxY, boxW, boxH, '#f59e0b');
+    DOM.faceGuide.classList.remove('active');
+    DOM.guideText.textContent = 'Rostro fuera de encuadre';
     gestionarEstabilidad(false);
   }
 }
@@ -435,19 +442,30 @@ function onResultadosMediaPipe(results) {
 function dibujarBordeRostro(ctx, x, y, w, h, color) {
   ctx.save();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 3;
-  ctx.setLineDash([8, 6]);
+  ctx.lineWidth = 2.5;
+  ctx.setLineDash([6, 4]);
   ctx.strokeRect(x, y, w, h);
+
+  // Etiqueta clara de detección
+  ctx.fillStyle = color;
+  const tagH = 18;
+  const tagW = 105;
+  const tagY = Math.max(0, y - tagH - 2);
+  ctx.fillRect(x, tagY, tagW, tagH);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px Inter, system-ui, sans-serif';
+  ctx.fillText('✓ Rostro Detectado', x + 5, tagY + 13);
   ctx.restore();
 }
 
 function manejarSinRostro() {
   state.faceDetected = false;
+  DOM.faceGuide.classList.remove('active');
   gestionarEstabilidad(false);
   if (state.isInCooldown) state.faceDisappearedDuringCooldown = true;
   if (!state.isInCooldown && !state.isAnalyzing) {
-    actualizarBadgeDeteccion('state-waiting', 'Esperando encuadre');
-    DOM.guideText.textContent = 'Centra al estudiante en el cuadro';
+    actualizarBadgeDeteccion('state-waiting', 'Esperando estudiante...');
+    DOM.guideText.textContent = 'Ubícate frente a la cámara';
   }
 }
 

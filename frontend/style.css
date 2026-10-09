@@ -269,20 +269,21 @@ body {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 50%;
-  height: 65%;
-  border-radius: 50% 50% 45% 45%;
-  border: 1.5px dashed rgba(255, 255, 255, 0.4);
+  width: 75%;
+  height: 80%;
+  border-radius: var(--radius-lg);
+  border: 1.5px dashed rgba(255, 255, 255, 0.25);
   pointer-events: none;
   z-index: 3;
   display: flex;
   align-items: flex-end;
   justify-content: center;
   padding-bottom: 0.75rem;
+  transition: all 0.25s ease;
 }
 
 .face-guide.active {
-  border: 2px solid #38bdf8;
+  border: 2px solid rgba(34, 197, 94, 0.7);
 }
 
 .face-guide.locked {
