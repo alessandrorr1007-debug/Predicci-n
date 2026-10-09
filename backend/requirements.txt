@@ -1,4 +1,7 @@
 # AulaPredict - Dependencias Backend (Optimizado para Render y Produccion)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+torchvision
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 gunicorn>=21.2.0
