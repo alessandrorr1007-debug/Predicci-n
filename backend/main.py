@@ -64,12 +64,18 @@ async def lifespan(app: FastAPI):
 
     def warmup_general():
         try:
-            obtener_modelo_yolo()
+            modelo = obtener_modelo_yolo()
+            if modelo is not None:
+                import numpy as np
+                dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+                modelo.predict(source=dummy, imgsz=320, verbose=False)
+                logger.info("¡Modelo YOLO de supervisión (best.pt) precargado y calentado con éxito!")
         except Exception as e:
-            logger.warning(f"Error al precargar YOLO: {e}")
+            logger.warning(f"Error al precargar/calentar YOLO: {e}")
         try:
             # En servidores gratuitos de Render (512MB RAM), no precargar TensorFlow para evitar OOM
-            if os.environ.get("RENDER") != "true":
+            es_render = os.environ.get("RENDER") == "true" or "onrender.com" in os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+            if not es_render:
                 precargar_modelo()
             else:
                 logger.info("Modo nube Render (512MB RAM): precarga de TensorFlow omitida para garantizar estabilidad.")

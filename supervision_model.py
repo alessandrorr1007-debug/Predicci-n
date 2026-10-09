@@ -88,6 +88,11 @@ def obtener_modelo_yolo():
             logger.warning(f"No se encontró el modelo en {RUTA_MODELO_YOLO}")
             return None
         try:
+            import torch
+            es_render = os.environ.get("RENDER") == "true" or "onrender.com" in os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+            if es_render:
+                torch.set_num_threads(2)
+            os.environ["YOLO_VERBOSE"] = "False"
             from ultralytics import YOLO
             logger.info(f"Cargando modelo YOLO de supervisión desde: {RUTA_MODELO_YOLO}")
             _modelo_yolo = YOLO(RUTA_MODELO_YOLO)
@@ -326,21 +331,34 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
             }
         }
 
-    # 2. Preprocesamiento y mejoramiento de imagen para potenciar objetos
-    img_mejorada = preprocesar_y_mejorar_imagen(img_bgr)
+    # 2. Reescalado inteligente para inferencia ultrarrápida en Render / CPU
+    es_render = os.environ.get("RENDER") == "true" or "onrender.com" in os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+    max_dim = 480 if es_render else 640
+    factor_escala = 1.0
+    if max(alto, ancho) > max_dim:
+        factor_escala = max_dim / float(max(alto, ancho))
+        nuevo_w = max(16, int(ancho * factor_escala))
+        nuevo_h = max(16, int(alto * factor_escala))
+        img_para_yolo = cv2.resize(img_bgr, (nuevo_w, nuevo_h), interpolation=cv2.INTER_AREA)
+    else:
+        img_para_yolo = img_bgr
 
-    # 3. Inferencia con YOLOv8 (usando corte sensible 0.15, imgsz=640 e iou=0.45)
+    # Preprocesamiento y mejoramiento de imagen para potenciar objetos
+    img_mejorada = preprocesar_y_mejorar_imagen(img_para_yolo)
+
+    # 3. Inferencia con YOLOv8 (usando corte sensible 0.15, imgsz calibrado e iou=0.45)
+    tamanio_inferencia = 480 if es_render else 640
     resultados = modelo.predict(
         source=img_mejorada,
         conf=UMBRAL_CORTE_GLOBAL,
         iou=0.45,
-        imgsz=640,
+        imgsz=tamanio_inferencia,
         verbose=False
     )
     detecciones = []
     personas_cajas = []
 
-    # Extraer detecciones aplicando umbrales calibrados por clase
+    # Extraer detecciones aplicando umbrales calibrados por clase y reescalando a dimensiones originales
     for r in resultados:
         if r.boxes is None:
             continue
@@ -348,6 +366,20 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
             cls_id = int(b.cls[0].item())
             conf = float(b.conf[0].item())
             x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
+
+            # Proyectar coordenadas a resolución original si fue reescalada
+            if factor_escala != 1.0:
+                x1 = x1 / factor_escala
+                y1 = y1 / factor_escala
+                x2 = x2 / factor_escala
+                y2 = y2 / factor_escala
+
+            # Asegurar límites válidos dentro de la imagen
+            x1 = max(0.0, min(float(ancho), x1))
+            y1 = max(0.0, min(float(alto), y1))
+            x2 = max(0.0, min(float(ancho), x2))
+            y2 = max(0.0, min(float(alto), y2))
+
             clase_nombre = CLASES_MODELO[cls_id] if cls_id < len(CLASES_MODELO) else f"clase_{cls_id}"
             clase_key = clase_nombre.lower()
 
@@ -365,40 +397,6 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
             detecciones.append(det)
             if clase_key == "persona":
                 personas_cajas.append([x1, y1, x2, y2])
-
-    # Cobertura adicional: si no detectó objeto infractor en la imagen mejorada, probar sobre imagen original
-    tiene_infraccion = any(d["clase"].lower() in OBJETOS_NO_PERMITIDOS for d in detecciones)
-    if not tiene_infraccion:
-        res_orig = modelo.predict(
-            source=img_bgr,
-            conf=UMBRAL_CORTE_GLOBAL,
-            iou=0.45,
-            imgsz=640,
-            verbose=False
-        )
-        for r in res_orig:
-            if r.boxes is None:
-                continue
-            for b in r.boxes:
-                cls_id = int(b.cls[0].item())
-                conf = float(b.conf[0].item())
-                clase_nombre = CLASES_MODELO[cls_id] if cls_id < len(CLASES_MODELO) else f"clase_{cls_id}"
-                clase_key = clase_nombre.lower()
-                umbral_min = UMBRALES_POR_CLASE.get(clase_key, 0.20)
-                if conf >= umbral_min and clase_key in OBJETOS_NO_PERMITIDOS:
-                    x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
-                    # Evitar duplicados
-                    ya_registrado = any(
-                        abs(d["caja"][0] - x1) < 25 and abs(d["caja"][1] - y1) < 25
-                        for d in detecciones if d["clase"].lower() == clase_key
-                    )
-                    if not ya_registrado:
-                        detecciones.append({
-                            "id": len(detecciones) + 1,
-                            "clase": clase_nombre,
-                            "confianza": round(conf, 3),
-                            "caja": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
-                        })
 
     # Calcular relaciones espaciales para objetos no permitidos
     for det in detecciones:
