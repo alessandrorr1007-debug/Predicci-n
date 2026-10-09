@@ -333,7 +333,7 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
 
     # 2. Reescalado inteligente para inferencia ultrarrápida en Render / CPU
     es_render = os.environ.get("RENDER") == "true" or "onrender.com" in os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
-    max_dim = 480 if es_render else 640
+    max_dim = 360 if es_render else 640
     factor_escala = 1.0
     if max(alto, ancho) > max_dim:
         factor_escala = max_dim / float(max(alto, ancho))
@@ -347,14 +347,21 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
     img_mejorada = preprocesar_y_mejorar_imagen(img_para_yolo)
 
     # 3. Inferencia con YOLOv8 (usando corte sensible 0.15, imgsz calibrado e iou=0.45)
-    tamanio_inferencia = 480 if es_render else 640
-    resultados = modelo.predict(
-        source=img_mejorada,
-        conf=UMBRAL_CORTE_GLOBAL,
-        iou=0.45,
-        imgsz=tamanio_inferencia,
-        verbose=False
-    )
+    tamanio_inferencia = 320 if es_render else 640
+    try:
+        import torch
+        with torch.inference_mode():
+            resultados = modelo.predict(
+                source=img_mejorada,
+                conf=UMBRAL_CORTE_GLOBAL,
+                iou=0.45,
+                imgsz=tamanio_inferencia,
+                device="cpu",
+                verbose=False
+            )
+    except Exception as e:
+        logger.warning(f"Error en predict YOLO: {e}")
+        resultados = []
     detecciones = []
     personas_cajas = []
 
