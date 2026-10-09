@@ -236,37 +236,47 @@ function cambiarModo(nuevoModo) {
 // VERIFICACIÓN DE SALUD DEL BACKEND (/salud)
 // ============================================================================
 async function verificarSaludBackend() {
-  let url = CONFIG.BACKEND_URL;
+  const isLocalEnv = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || !window.location.hostname;
   let data = null;
+  let urlActiva = null;
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500);
-    const res = await fetch(`${url}/salud`, { method: 'GET', signal: controller.signal });
-    clearTimeout(timeoutId);
-    if (res.ok) data = await res.json();
-  } catch (_) {
-    const isLocalEnv = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || !window.location.hostname;
-    if (isLocalEnv && url !== CONFIG.RENDER_BACKEND_URL) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-        const resFallback = await fetch(`${CONFIG.RENDER_BACKEND_URL}/salud`, { method: 'GET', signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (resFallback.ok) {
-          data = await resFallback.json();
-          CONFIG.BACKEND_URL = CONFIG.RENDER_BACKEND_URL;
-          url = CONFIG.RENDER_BACKEND_URL;
-        }
-      } catch (_) {}
-    }
+  // 1. Si estamos en local, SIEMPRE probar primero el servidor local (sin latencia)
+  if (isLocalEnv) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${CONFIG.LOCAL_BACKEND_URL}/salud`, { method: 'GET', signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        data = await res.json();
+        urlActiva = CONFIG.LOCAL_BACKEND_URL;
+        CONFIG.BACKEND_URL = CONFIG.LOCAL_BACKEND_URL;
+      }
+    } catch (_) {}
   }
 
+  // 2. Si local no respondió o estamos en la nube, probar Render
+  if (!data) {
+    const urlNube = CONFIG.RENDER_BACKEND_URL;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const resFallback = await fetch(`${urlNube}/salud`, { method: 'GET', signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (resFallback.ok) {
+        data = await resFallback.json();
+        urlActiva = urlNube;
+        CONFIG.BACKEND_URL = urlNube;
+      }
+    } catch (_) {}
+  }
+
+  // 3. Actualizar estado e indicador en la barra superior
   if (data) {
     state.backendOnline = true;
     state.modelReady = data.modelo_listo === true;
 
-    const esRender = url.includes('onrender.com');
+    const esRender = urlActiva && urlActiva.includes('onrender.com');
     const etiquetaOrigen = esRender ? ' (Nube Render)' : ' (Local)';
 
     if (state.modelReady) {
@@ -553,38 +563,60 @@ async function enviarImagenABackend(blobOFile) {
   const formData = new FormData();
   formData.append('archivo', blobOFile, 'captura.jpg');
 
-  try {
-    const response = await fetch(`${CONFIG.BACKEND_URL}/analizar`, {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (response.status === 503) {
-      const errData = await response.json().catch(() => ({}));
-      mostrarError(errData.mensaje || 'Los modelos de IA se están preparando, espera unos segundos...');
-      DOM.warmupBanner.classList.remove('hidden');
-      return;
-    }
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `Error en el servidor: HTTP ${response.status}`);
-    }
-
-    const resultado = await response.json();
-    procesarRespuestaBackend(resultado);
-
-  } catch (err) {
-    console.error('Error al enviar imagen al backend:', err);
-    mostrarError(
-      !state.backendOnline
-        ? `No se puede conectar con el servidor backend (${CONFIG.BACKEND_URL}). Asegúrate de que FastAPI esté activo.`
-        : `Error en análisis: ${err.message}`
-    );
-  } finally {
-    finalizarAnalisis();
-    if (state.currentMode === 'camera') iniciarCooldown();
+  // Lista de URLs a probar en orden prioritario
+  const urlsAProbar = [CONFIG.BACKEND_URL];
+  if (CONFIG.BACKEND_URL !== CONFIG.LOCAL_BACKEND_URL) {
+    urlsAProbar.push(CONFIG.LOCAL_BACKEND_URL);
+  } else {
+    urlsAProbar.push(CONFIG.RENDER_BACKEND_URL);
   }
+
+  let exito = false;
+  let ultimoError = null;
+
+  for (const urlBase of urlsAProbar) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const response = await fetch(`${urlBase}/analizar`, {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (response.status === 503) {
+        const errData = await response.json().catch(() => ({}));
+        mostrarError(errData.mensaje || 'Los modelos de IA se están preparando, espera unos segundos...');
+        DOM.warmupBanner.classList.remove('hidden');
+        exito = true;
+        break;
+      }
+
+      if (response.ok) {
+        const resultado = await response.json();
+        // Si funcionó con esta URL, guardarla como la activa
+        CONFIG.BACKEND_URL = urlBase;
+        state.backendOnline = true;
+        procesarRespuestaBackend(resultado);
+        exito = true;
+        break;
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        ultimoError = new Error(errorData.detail || `Error en el servidor: HTTP ${response.status}`);
+      }
+    } catch (err) {
+      ultimoError = err;
+    }
+  }
+
+  if (!exito) {
+    console.error('Error al enviar imagen al backend:', ultimoError);
+    mostrarError(`No se puede conectar con el backend (${CONFIG.BACKEND_URL}). Asegúrate de que FastAPI esté activo en el puerto 8000.`);
+  }
+
+  finalizarAnalisis();
+  if (state.currentMode === 'camera') iniciarCooldown();
 }
 
 function finalizarAnalisis() {
