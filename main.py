@@ -1,12 +1,18 @@
 """
-AulaPredict - Módulo Imagen
+AulaPredict - Módulo PREDICCIÓN & Supervisión de Exámenes
 Servidor API Backend con FastAPI (main.py)
 """
 
 import os
 import sys
+import json
+import csv
+import logging
+import threading
+from contextlib import asynccontextmanager
+from typing import Dict, Any, List
 
-# Configurar UTF-8 en consola de Windows para evitar errores con emojis
+# Configurar UTF-8 en consola de Windows
 os.environ["PYTHONUTF8"] = "1"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 if sys.platform.startswith("win"):
@@ -18,18 +24,19 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-import logging
-import threading
-from contextlib import asynccontextmanager
-from typing import Dict, Any
-
 from fastapi import FastAPI, File, UploadFile, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from emotion_model import detectar_emocion, precargar_modelo, esta_modelo_listo
+from supervision_model import (
+    analizar_imagen_supervision,
+    predecir_desde_datos_lote,
+    esta_modelo_supervision_listo,
+    obtener_modelo_yolo,
+)
 
-# Configuración del sistema de registro (Logging)
+# Configuración de Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(name)s]: %(message)s",
@@ -37,15 +44,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("aulapredict.main")
 
-# Límite máximo de tamaño de archivo (5 MB)
-MAX_FILE_SIZE = 5 * 1024 * 1024
-# Tipos MIME permitidos
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB para imágenes o reportes CSV/JSON
 ALLOWED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
     "image/webp",
     "image/bmp",
-    "application/octet-stream", # Algunos navegadores envían octet-stream para blobs
+    "application/octet-stream",
 }
 
 
@@ -53,33 +58,38 @@ ALLOWED_MIME_TYPES = {
 async def lifespan(app: FastAPI):
     """
     Gestión del ciclo de vida de la aplicación.
-    Inicia la precarga del modelo en un hilo separado al arrancar el servidor
-    para que la API responda inmediatamente y realice el warm-up sin bloquear.
+    Precarga los modelos de IA en un hilo de fondo al iniciar el servidor.
     """
-    logger.info("Iniciando servicio AulaPredict - Módulo Imagen...")
-    # Ejecutamos el warm-up del modelo en un hilo en segundo plano
-    hilo_precarga = threading.Thread(
-        target=precargar_modelo,
-        name="HiloWarmupModelo",
-        daemon=True,
-    )
-    hilo_precarga.start()
+    logger.info("Iniciando servicio AulaPredict (IMAGEN + PREDICCIÓN)...")
+
+    def warmup_general():
+        try:
+            obtener_modelo_yolo()
+        except Exception as e:
+            logger.warning(f"Error al precargar YOLO: {e}")
+        try:
+            precargar_modelo()
+        except Exception as e:
+            logger.warning(f"Error al precargar modelo de emociones: {e}")
+
+    hilo = threading.Thread(target=warmup_general, name="HiloWarmupIA", daemon=True)
+    hilo.start()
     yield
     logger.info("Cerrando servicio AulaPredict.")
 
 
-# Inicialización de la aplicación FastAPI
+# Inicialización de FastAPI
 app = FastAPI(
-    title="AulaPredict - Módulo Imagen",
-    description="API para la detección de emociones en imágenes capturadas con cámara web.",
-    version="1.0.0",
+    title="AulaPredict - Módulo PREDICCIÓN & Supervisión",
+    description="API de Visión por Computadora y Machine Learning para Supervisión de Exámenes y Acompañamiento Académico.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# Configuración de CORS para permitir la comunicación con el frontend
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción se puede restringir a dominios específicos
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,91 +98,132 @@ app.add_middleware(
 
 @app.get(
     "/salud",
-    summary="Verificar estado de salud del servidor",
-    response_description="Estado del servidor y preparación del modelo",
+    summary="Verificar estado de salud del servidor y modelos",
+    response_description="Estado de preparación de los modelos de IA",
 )
 async def verificar_salud() -> Dict[str, Any]:
-    """
-    Endpoint GET /salud:
-    Permite al frontend verificar si el servidor está activo y si el modelo
-    de emociones ya completó su descarga/warm-up inicial.
-    """
-    listo = esta_modelo_listo()
+    """Endpoint GET /salud: Verifica el estado del servidor y la disponibilidad de los modelos."""
+    yolo_listo = esta_modelo_supervision_listo()
+    emocion_listo = esta_modelo_listo()
+    listo = yolo_listo or emocion_listo
     return {
         "estado": "ok",
         "modelo_listo": listo,
-        "mensaje": "Servicio operando normalmente" if listo else "El modelo se está preparando, espera unos segundos...",
+        "modelo_supervision_listo": yolo_listo,
+        "modelo_emocion_listo": emocion_listo,
+        "mensaje": "Servicio operando normalmente" if listo else "Modelos preparándose...",
     }
 
 
 @app.post(
     "/analizar",
-    summary="Analizar emoción en una imagen facial",
-    response_description="Emoción detectada, probabilidades, confianza y estado académico",
+    summary="Analizar imagen: Detección de objetos prohibidos (YOLO) + Predicción de Fraude + Estado Facial",
+    response_description="Resultado predictivo consolidado de supervisión y emoción",
 )
 async def analizar_imagen(
-    archivo: UploadFile = File(..., description="Archivo de imagen facial (JPEG, PNG, WebP)")
+    archivo: UploadFile = File(..., description="Archivo de imagen capturado o cargado")
 ) -> Dict[str, Any]:
     """
     Endpoint POST /analizar:
-    Recibe una imagen (multipart/form-data), valida su tamaño y formato,
-    la procesa enteramente en memoria RAM (sin tocar el disco duro)
-    y retorna la emoción detectada, confianza y estado académico.
+    Procesa la imagen en memoria RAM mediante:
+    1. Modelo YOLOv8 ('best.pt') del equipo para detectar celular, audífonos, libros, persona.
+    2. Motor de PREDICCIÓN: cálculo de probabilidad de fraude y nivel de riesgo (Crítico/Moderado/Normal).
+    3. Análisis de emoción facial y estado académico para el tutor.
     """
-    # 1. Validación de tipo MIME
-    tipo_contenido = archivo.content_type or ""
-    if tipo_contenido and tipo_contenido not in ALLOWED_MIME_TYPES:
-        logger.warning(f"Tipo de archivo no permitido recibido: {tipo_contenido}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Formato de imagen no soportado ({tipo_contenido}). Usa JPEG, PNG o WebP.",
-        )
-
-    # 2. Lectura en memoria RAM
-    try:
-        contenido_bytes = await archivo.read()
-    except Exception as e:
-        logger.error(f"Error al leer el archivo recibido: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No se pudo leer el archivo transmitido.",
-        )
-
-    # 3. Validación de tamaño (máx. 5 MB)
-    tamano_bytes = len(contenido_bytes)
-    if tamano_bytes == 0:
+    contenido_bytes = await archivo.read()
+    if not contenido_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El archivo recibido está vacío.",
         )
 
-    if tamano_bytes > MAX_FILE_SIZE:
-        logger.warning(f"Archivo excedió el límite: {tamano_bytes} bytes")
+    if len(contenido_bytes) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"La imagen supera el límite de 5 MB ({tamano_bytes / (1024 * 1024):.2f} MB).",
+            detail="La imagen supera el límite de 10 MB.",
         )
 
-    # 4. Verificación de preparación del modelo
-    if not esta_modelo_listo():
-        logger.info("Petición recibida mientras el modelo está calentando.")
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={
-                "estado": "preparando",
-                "modelo_listo": False,
-                "mensaje": "El modelo se está preparando, espera unos segundos e intenta nuevamente.",
-            },
+    logger.info(f"Analizando imagen ({len(contenido_bytes) / 1024:.1f} KB)...")
+
+    # 1. Ejecutar Supervisión & Predicción de Examen (best.pt)
+    res_supervision = analizar_imagen_supervision(contenido_bytes)
+
+    # 2. Ejecutar Detección Emocional (Respaldo / Evaluación del rostro)
+    res_emocion = detectar_emocion(contenido_bytes)
+
+    # 3. Consolidar respuesta híbrida de alta compatibilidad
+    return {
+        # Campos compatibles con frontend de emociones
+        "emocion": res_emocion.get("emocion") or "neutral",
+        "confianza": res_emocion.get("confianza", 0.0),
+        "probabilidades": res_emocion.get("probabilidades", {}),
+        "rostro_detectado": res_emocion.get("rostro_detectado", True),
+        "estado_academico": res_emocion.get("estado_academico", "estable"),
+        "mensaje": res_emocion.get("mensaje", "Análisis completado"),
+        
+        # Campos del módulo de Supervisión y Predicción de Exámenes (IMAGEN ➔ PREDICCIÓN)
+        "supervision": res_supervision,
+    }
+
+
+@app.post(
+    "/supervision/predecir_lote",
+    summary="Predicción por lote desde archivo CSV o JSON generado por IMAGEN",
+    response_description="Tabla predictiva de riesgo para todas las alertas",
+)
+async def predecir_lote(
+    archivo: UploadFile = File(..., description="Archivo CSV o JSON exportado por el módulo IMAGEN")
+) -> Dict[str, Any]:
+    """
+    Endpoint POST /supervision/predecir_lote:
+    Recibe el archivo 'resultados_alertas.csv' o 'resultados_alertas.json' exportado
+    por el equipo de IMAGEN y genera la matriz predictiva de riesgo para cada alerta.
+    """
+    contenido_bytes = await archivo.read()
+    nombre_archivo = (archivo.filename or "").lower()
+
+    registros = []
+    try:
+        if nombre_archivo.endswith(".json") or archivo.content_type == "application/json":
+            datos_json = json.loads(contenido_bytes.decode("utf-8"))
+            if isinstance(datos_json, dict) and "frames" in datos_json:
+                # Formato exportado por modulo_imagen/exportacion.py
+                for f in datos_json["frames"]:
+                    for obj in f.get("objetos", []):
+                        item = {"frame_id": f.get("frame_id"), "archivo": f.get("origen")}
+                        item.update(obj)
+                        registros.append(item)
+            elif isinstance(datos_json, list):
+                registros = datos_json
+            else:
+                registros = [datos_json]
+
+        else:
+            # Procesar como CSV
+            texto_csv = contenido_bytes.decode("utf-8", errors="ignore")
+            lector = csv.DictReader(io.StringIO(texto_csv))
+            for fila in lector:
+                registros.append(dict(fila))
+
+    except Exception as e:
+        logger.error(f"Error al parsear archivo de lote: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al interpretar el archivo: {e}",
         )
 
-    # 5. Inferencia en memoria usando emotion_model.py
-    logger.info(f"Procesando imagen en memoria ({tamano_bytes / 1024:.1f} KB)...")
-    resultado = detectar_emocion(contenido_bytes)
+    if not registros:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se encontraron registros de alertas válidos en el archivo.",
+        )
 
-    return resultado
+    logger.info(f"Procesando lote de {len(registros)} alertas recibidas de IMAGEN...")
+    resultado_predictivo = predecir_desde_datos_lote(registros)
+    return resultado_predictivo
 
 
-# Montaje del frontend estático para despliegue unificado (ej. en Render)
+# Montaje del frontend estático
 ruta_frontend = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
 if os.path.exists(ruta_frontend):
     from fastapi.staticfiles import StaticFiles
