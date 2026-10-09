@@ -25,6 +25,12 @@ import numpy as np
 from PIL import Image
 from typing import Dict, Any, List, Optional, Tuple
 
+try:
+    import torch
+    torch.set_num_threads(2)
+except Exception:
+    pass
+
 logger = logging.getLogger("aulapredict.supervision_model")
 
 # Ruta del modelo YOLO entrenado por el equipo
@@ -59,9 +65,9 @@ OBJETOS_NO_PERMITIDOS = {
 OBJETOS_PERMITIDOS = {"persona", "mochila", "laptop"}
 
 # Umbrales específicos por clase (calibrados acordes al módulo IMAGEN)
-# Teléfono, audífonos y reloj se detectan con ultra alta sensibilidad (>= 0.08) para captar celulares en mano
+# Teléfono, celular, audífonos y reloj se detectan con ultra alta sensibilidad (>= 0.08) para captar celulares en mano
 UMBRALES_POR_CLASE = {
-    "persona": 0.18,
+    "persona": 0.15,
     "telefono": 0.08,
     "celular": 0.08,
     "phone": 0.08,
@@ -69,11 +75,11 @@ UMBRALES_POR_CLASE = {
     "airpods": 0.08,
     "reloj": 0.08,
     "mochila": 0.12,
-    "laptop": 0.18,
-    "cuaderno": 0.30,
-    "libro": 0.30,
+    "laptop": 0.15,
+    "cuaderno": 0.20,
+    "libro": 0.20,
 }
-UMBRAL_CORTE_GLOBAL = 0.06
+UMBRAL_CORTE_GLOBAL = 0.05
 
 # Modelo YOLO singleton en memoria
 _modelo_yolo = None
@@ -382,7 +388,7 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
                 })
         return nuevas
 
-    # Pase 1: Inferencia sobre la imagen natural a 640px nativos
+    # 3. Inferencia con YOLOv8 a resolución 640px nativa con máxima sensibilidad
     try:
         import torch
         with torch.inference_mode():
@@ -396,7 +402,7 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
             )
             cajas_raw = extraer_cajas(res_raw)
     except Exception as e:
-        logger.warning(f"Error en inferencia raw YOLO: {e}")
+        logger.warning(f"Error en inferencia YOLO: {e}")
         cajas_raw = []
 
     for c in cajas_raw:
@@ -408,44 +414,6 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
         })
         if c["clase_key"] == "persona":
             personas_cajas.append(c["caja"])
-
-    # Pase 2 (Ensemble de Alta Sensibilidad): Si no se detectó infracción (celular, etc.),
-    # evaluar también la imagen mejorada con CLAHE para rescatar objetos en sombra o contraluz
-    tiene_infraccion = any(d["clase"].lower() in OBJETOS_NO_PERMITIDOS for d in detecciones)
-    if not tiene_infraccion:
-        try:
-            img_mejorada = preprocesar_y_mejorar_imagen(img_para_yolo)
-            import torch
-            with torch.inference_mode():
-                res_proc = modelo.predict(
-                    source=img_mejorada,
-                    conf=UMBRAL_CORTE_GLOBAL,
-                    iou=0.45,
-                    imgsz=640,
-                    device="cpu",
-                    verbose=False
-                )
-                cajas_proc = extraer_cajas(res_proc)
-
-            for cp in cajas_proc:
-                ck = cp["clase_key"]
-                if ck in OBJETOS_NO_PERMITIDOS:
-                    # Evitar duplicados si ya existe en la misma zona
-                    ya_existe = any(
-                        d["clase"].lower() == ck and
-                        abs(d["caja"][0] - cp["caja"][0]) < 35 and
-                        abs(d["caja"][1] - cp["caja"][1]) < 35
-                        for d in detecciones
-                    )
-                    if not ya_existe:
-                        detecciones.append({
-                            "id": len(detecciones) + 1,
-                            "clase": cp["clase"],
-                            "confianza": cp["confianza"],
-                            "caja": cp["caja"],
-                        })
-        except Exception as e:
-            logger.warning(f"Error en pase ensemble YOLO: {e}")
 
     # Calcular relaciones espaciales para objetos no permitidos
     for det in detecciones:
@@ -487,6 +455,9 @@ def analizar_imagen_supervision(imagen_bytes: bytes) -> Dict[str, Any]:
     # Codificar imagen anotada en Base64 JPEG
     _, buffer = cv2.imencode(".jpg", img_anotada, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     imagen_base64 = "data:image/jpeg;base64," + base64.b64encode(buffer).decode("utf-8")
+
+    import gc
+    gc.collect()
 
     return {
         "exito": True,

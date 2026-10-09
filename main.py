@@ -24,6 +24,12 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
+try:
+    import torch
+    torch.set_num_threads(2)
+except Exception:
+    pass
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
