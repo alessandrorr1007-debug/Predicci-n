@@ -68,7 +68,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Error al precargar YOLO: {e}")
         try:
-            precargar_modelo()
+            # En servidores gratuitos de Render (512MB RAM), no precargar TensorFlow para evitar OOM
+            if os.environ.get("RENDER") != "true":
+                precargar_modelo()
+            else:
+                logger.info("Modo nube Render (512MB RAM): precarga de TensorFlow omitida para garantizar estabilidad.")
         except Exception as e:
             logger.warning(f"Error al precargar modelo de emociones: {e}")
 
